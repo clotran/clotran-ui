@@ -1,0 +1,5 @@
+;; clotran-ui: windows, widgets, a 2D canvas and a 3D view for clotran,
+;; over libui-ng. Provided libraries (org.clojure/clojure) are clotran
+;; itself; see clotran's PACKAGES.md.
+{:paths ["src"]
+ :deps {org.clojure/clojure {:mvn/version "1.12.6"}}}

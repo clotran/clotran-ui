@@ -192,6 +192,7 @@
 (defonce ^:private handlers (atom {}))   ; window -> fn of an event
 (defonce ^:private pump (atom nil))      ; the future draining events
 (defonce ^:private pending (atom {}))    ; window -> events that came before its handler
+(defonce ^:private threw (atom {}))      ; window -> the last failure its handler reported
 
 (def ^:private kinds {1 :move 2 :down 3 :up 4 :key 5 :resize 6 :closed 7 :text 8 :left 9 :scroll})
 (def ^:private ext-keys
@@ -210,10 +211,16 @@
       :scroll {:type :scroll :window win :dy y}
       {:type t :window win})))
 
-(defn- call-handler [f e]
+(defn- call-handler
+  "f on e; a failure is reported once per window until it changes, not on
+  every redraw."
+  [f e]
   (try (f e)
        (catch :default ex
-         (binding [*out* *err*] (println "clotran-ui: the handler of window" (:window e) "threw:" (ex-message ex))))))
+         (let [m (or (not-empty (ex-message ex)) (str ex))]   ; an index error's message is ""
+           (when (not= m (get @threw (:window e)))
+             (swap! threw assoc (:window e) m)
+             (binding [*out* *err*] (println "clotran-ui: the handler of window" (:window e) "threw:" m)))))))
 
 (defn- dispatch
   "e to its window's handler; kept for the handler when the window has
@@ -235,7 +242,7 @@
       (when (pos? (:kind r))
         (let [e (event-map r)]
           (dispatch e)
-          (when (= :closed (:type e)) (swap! handlers dissoc (:window e)) (swap! pending dissoc (:window e)))))
+          (when (= :closed (:type e)) (swap! handlers dissoc (:window e)) (swap! pending dissoc (:window e)) (swap! threw dissoc (:window e)))))
       (if (or (pos? (:kind r)) (pos? (:n (call "open-count"))))
         (recur)
         (reset! pump nil)))))
@@ -361,6 +368,13 @@
   "The window closed, as by its close button."
   [w]
   (call "close" (int w))
+  nil)
+
+(defn front!
+  "The window brought to the front, above other applications, as a new
+  window is when first shown; nothing when it is closed."
+  [w]
+  (call "front" (int w))
   nil)
 
 (defn open-count [] (:n (call "open-count")))

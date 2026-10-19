@@ -48,3 +48,18 @@ int clotran_ui_capture(uiWindow *w, const char *path)
 	ReleaseDC(NULL, screen);
 	return ok;
 }
+
+// A new window comes to the front, above the console or editor that started
+// clotran: Windows lets only the foreground thread's input set the
+// foreground, so this thread shares that thread's input while it does.
+void clotran_ui_front(uiWindow *w)
+{
+	HWND h = (HWND) uiControlHandle(uiControl(w));
+	HWND fg = GetForegroundWindow();
+	DWORD fgt = fg ? GetWindowThreadProcessId(fg, NULL) : 0, me = GetCurrentThreadId();
+	int att = fgt && fgt != me && AttachThreadInput(fgt, me, TRUE);
+	ShowWindow(h, SW_SHOW);
+	BringWindowToTop(h);
+	SetForegroundWindow(h);
+	if (att) AttachThreadInput(fgt, me, FALSE);
+}

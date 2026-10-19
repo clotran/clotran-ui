@@ -106,6 +106,12 @@ static int on_main(void (*f)(void *), void *arg)
 	return 1;
 }
 
+#if defined(__APPLE__) || defined(_WIN32)
+extern void clotran_ui_front(uiWindow *);   // darwin.m, windows.c
+#else
+static void clotran_ui_front(uiWindow *w) {}
+#endif
+
 #ifdef __APPLE__
 extern void clotran_ui_wake(void);
 static void wake(void *p) { clotran_ui_wake(); }
@@ -423,6 +429,7 @@ static void make_window(void *p)
 	made++;
 	pthread_mutex_unlock(&mu);
 	uiControlShow(uiControl(w->w));
+	clotran_ui_front(w->w);   // above the terminal that started clotran
 	m->id = id;
 }
 
@@ -580,6 +587,19 @@ void ui_close_shim(int argc, void **argv)
 {
 	win *w = live(*(int *) argv[0]);
 	if (w) on_main(close_win, w);
+}
+
+// ui_front(id): an open window brought to the front, as a new one is
+static void front_win(void *p)
+{
+	win *w = p;
+	if (w->open) clotran_ui_front(w->w);
+}
+
+void ui_front_shim(int argc, void **argv)
+{
+	win *w = live(*(int *) argv[0]);
+	if (w) on_main(front_win, w);
 }
 
 // ui_open_count(out n): windows open now
@@ -865,6 +885,7 @@ const char *clotran_manifest(void)
 		"{:name \"entry-text\" :symbol \"ui_entry_text_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0} {:name \"buf\" :type :int4 :intent :inout :rank 1} {:name \"n\" :type :int4 :intent :out :rank 0}]}"
 		"{:name \"next-event\" :symbol \"ui_next_event_shim\" :args [{:name \"ms\" :type :int4 :intent :in :rank 0} {:name \"kind\" :type :int4 :intent :out :rank 0} {:name \"win\" :type :int4 :intent :out :rank 0} {:name \"x\" :type :real8 :intent :out :rank 0} {:name \"y\" :type :real8 :intent :out :rank 0} {:name \"a\" :type :int4 :intent :out :rank 0} {:name \"b\" :type :int4 :intent :out :rank 0}]}"
 		"{:name \"close\" :symbol \"ui_close_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0}]}"
+		"{:name \"front\" :symbol \"ui_front_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0}]}"
 		"{:name \"open-count\" :symbol \"ui_open_count_shim\" :args [{:name \"n\" :type :int4 :intent :out :rank 0}]}"
 		"{:name \"wait\" :symbol \"ui_wait_shim\" :args [{:name \"ms\" :type :int4 :intent :in :rank 0} {:name \"n\" :type :int4 :intent :out :rank 0}]}"
 		"{:name \"snapshot\" :symbol \"ui_snapshot_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0} {:name \"w\" :type :int4 :intent :in :rank 0} {:name \"h\" :type :int4 :intent :in :rank 0} {:name \"path\" :type :string :intent :in :rank 0} {:name \"ok\" :type :int4 :intent :out :rank 0}]}"

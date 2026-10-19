@@ -46,3 +46,20 @@ void clotran_ui_wake(void)
 		[NSApp postEvent:e atStart:NO];
 	}
 }
+
+// A new window comes to the front, above the terminal or editor that
+// started clotran: activation is only a request since macOS 14 (it can be
+// refused while another app is active), so the window is also ordered
+// front regardless of it.
+void clotran_ui_front(uiWindow *w)
+{
+	@autoreleasepool {
+		NSWindow *nw = (NSWindow *) uiControlHandle(uiControl(w));
+		if ([NSApp respondsToSelector:@selector(activate)])
+			[NSApp performSelector:@selector(activate)];
+		else
+			[NSApp activateIgnoringOtherApps:YES];
+		[nw makeKeyAndOrderFront:nil];
+		[nw orderFrontRegardless];
+	}
+}

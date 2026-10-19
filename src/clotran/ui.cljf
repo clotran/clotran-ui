@@ -132,6 +132,7 @@
 
 (defonce ^:private handlers (atom {}))   ; window -> fn of an event
 (defonce ^:private pump (atom nil))      ; the future draining events
+(defonce ^:private pending (atom {}))    ; window -> events that came before its handler
 
 (def ^:private kinds {1 :move 2 :down 3 :up 4 :key 5 :resize 6 :closed 7 :text 8 :left 9 :scroll})
 (def ^:private ext-keys
@@ -150,11 +151,22 @@
       :scroll {:type :scroll :window win :dy y}
       {:type t :window win})))
 
-(defn- dispatch [e]
-  (when-let [f (get @handlers (:window e))]
-    (try (f e)
-         (catch :default ex
-           (binding [*out* *err*] (println "clotran-ui: the handler of window" (:window e) "threw:" (ex-message ex)))))))
+(defn- call-handler [f e]
+  (try (f e)
+       (catch :default ex
+         (binding [*out* *err*] (println "clotran-ui: the handler of window" (:window e) "threw:" (ex-message ex))))))
+
+(defn- dispatch
+  "e to its window's handler; kept for the handler when the window has
+  none yet, if it says what state the window is in (:resize, :text) -- a
+  window draws, and so reports its size, before the call that made it
+  has returned and its handler is set."
+  [e]
+  (when-let [f (locking handlers
+                 (or (get @handlers (:window e))
+                     (do (when (#{:resize :text} (:type e)) (swap! pending update (:window e) (fnil conj []) e))
+                         nil)))]
+    (call-handler f e)))
 
 (defn- drain
   "Events, to their windows' handlers, until no window is open."
@@ -164,7 +176,7 @@
       (when (pos? (:kind r))
         (let [e (event-map r)]
           (dispatch e)
-          (when (= :closed (:type e)) (swap! handlers dissoc (:window e)))))
+          (when (= :closed (:type e)) (swap! handlers dissoc (:window e)) (swap! pending dissoc (:window e)))))
       (if (or (pos? (:kind r)) (pos? (:n (call "open-count"))))
         (recur)
         (reset! pump nil)))))
@@ -174,6 +186,8 @@
     (when-not @pump (reset! pump (future (drain))))))
 
 ;; ---- windows -------------------------------------------------------------
+
+(declare on-event!)
 
 (defn window
   "A new window, open and shown; answers its number. Options: :title,
@@ -191,14 +205,18 @@
                (if (and (neg? id) (< tries 3)) (recur (inc tries)) id)))]
     (when (neg? id) (throw (ex-info "clotran-ui: the event loop would not stay up" {})))
     (when (zero? id) (throw (ex-info "clotran-ui: too many windows (64)" {})))
-    (when on-event (swap! handlers assoc id on-event))
+    (when on-event (on-event! id on-event))
     (ensure-pump!)
     id))
 
 (defn on-event!
-  "f the window's event handler from now on."
+  "f the window's event handler from now on; it is handed first the
+  events that came before it was set."
   [w f]
-  (swap! handlers assoc w f)
+  (let [early (locking handlers
+                (swap! handlers assoc w f)
+                (let [es (get @pending w)] (swap! pending dissoc w) es))]
+    (doseq [e early] (call-handler f e)))
   w)
 
 ;; ---- the display list ------------------------------------------------------
@@ -265,6 +283,12 @@
   [w which s]
   (call "text" (int w) (int ({:label 0 :entry 1 :title 2} which)) (str s))
   w)
+
+(defn area-size
+  "The window's drawing area, [width height] in pixels, as it was last
+  drawn: what a picture for it must be made at."
+  [w]
+  (let [r (call "area-size" (int w))] [(:width r) (:height r)]))
 
 (defn entry-text
   "What the window's text field holds now."

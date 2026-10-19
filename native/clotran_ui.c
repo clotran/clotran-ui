@@ -246,7 +246,10 @@ static void replay(uiDrawContext *c, const layer *L)
 
 static win *of_area(uiArea *a)
 {
-	for (int i = 1; i <= MAXWIN; i++) if (wins[i].used && wins[i].area == a) return &wins[i];
+	// open windows only: a closed window's area is freed, and a new area may
+	// be given its address -- matching the closed one drew its old picture
+	// in the new window
+	for (int i = 1; i <= MAXWIN; i++) if (wins[i].used && wins[i].open && wins[i].area == a) return &wins[i];
 	return NULL;
 }
 
@@ -333,6 +336,7 @@ static int on_closing(uiWindow *uw, void *data)
 	win *w = data;
 	pthread_mutex_lock(&mu);
 	w->open = 0;
+	w->area = NULL;   // freed with the window; never matched again
 	nopen--;
 	int last = nopen == 0;
 	pthread_mutex_unlock(&mu);
@@ -413,12 +417,12 @@ static void make_window(void *p)
 	} else
 		uiWindowSetChild(w->w, uiControl(w->area));
 	uiWindowOnClosing(w->w, on_closing, w);
-	uiControlShow(uiControl(w->w));
-	pthread_mutex_lock(&mu);
+	pthread_mutex_lock(&mu);   // open before it is shown: its first draw finds it
 	w->open = 1;
 	nopen++;
 	made++;
 	pthread_mutex_unlock(&mu);
+	uiControlShow(uiControl(w->w));
 	m->id = id;
 }
 
@@ -825,6 +829,20 @@ void clotran_ui_on_scroll(void *native_window, double dy)
 		}
 }
 
+// ui_area_size(id, out w, out h): the drawing area's size at its last
+// draw -- what a picture for it must be drawn at
+void ui_area_size_shim(int argc, void **argv)
+{
+	*(double *) argv[1] = 0;
+	*(double *) argv[2] = 0;
+	win *w = live(*(int *) argv[0]);
+	if (!w) return;
+	pthread_mutex_lock(&mu);
+	*(double *) argv[1] = w->aw;
+	*(double *) argv[2] = w->ah;
+	pthread_mutex_unlock(&mu);
+}
+
 const char *clotran_manifest(void)
 {
 	return "{:package \"clotran.ui.native\" :routines ["
@@ -845,5 +863,6 @@ const char *clotran_manifest(void)
 		"{:name \"scene3d\" :symbol \"ui_scene3d_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0} {:name \"verts\" :type :real8 :intent :in :rank 1} {:name \"nv\" :type :int4 :intent :in :rank 0} {:name \"tris\" :type :int4 :intent :in :rank 1} {:name \"nt\" :type :int4 :intent :in :rank 0} {:name \"lines\" :type :real8 :intent :in :rank 1} {:name \"nl\" :type :int4 :intent :in :rank 0} {:name \"r\" :type :real8 :intent :in :rank 0} {:name \"g\" :type :real8 :intent :in :rank 0} {:name \"b\" :type :real8 :intent :in :rank 0}]}"
 		"{:name \"camera3d\" :symbol \"ui_camera3d_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0} {:name \"set\" :type :int4 :intent :in :rank 0} {:name \"az\" :type :real8 :intent :in :rank 0} {:name \"el\" :type :real8 :intent :in :rank 0} {:name \"zoom\" :type :real8 :intent :in :rank 0} {:name \"azimuth\" :type :real8 :intent :out :rank 0} {:name \"elevation\" :type :real8 :intent :out :rank 0} {:name \"scale\" :type :real8 :intent :out :rank 0}]}"
 		"{:name \"snapshot3d\" :symbol \"ui_snapshot3d_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0} {:name \"w\" :type :int4 :intent :in :rank 0} {:name \"h\" :type :int4 :intent :in :rank 0} {:name \"path\" :type :string :intent :in :rank 0} {:name \"ok\" :type :int4 :intent :out :rank 0}]}"
+		"{:name \"area-size\" :symbol \"ui_area_size_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0} {:name \"width\" :type :real8 :intent :out :rank 0} {:name \"height\" :type :real8 :intent :out :rank 0}]}"
 		"]}";
 }

@@ -22,7 +22,7 @@
 
 (def ^:private root
   ;; this repository: two directories above this file
-  (str/replace (clotran-resource "clotran/ui.cljf") #"[/\\]src[/\\]clotran[/\\]ui\.cljf$" ""))
+  (-> (clotran-resource "clotran/ui.cljf") (str/replace "\\" "/") (str/replace #"/src/clotran/ui\.cljf$" "")))
 
 (def ^:private os
   (let [o (str (clotran.host.system/getProperty "os.name"))]
@@ -53,8 +53,9 @@
         common (meson-sources "common")]
     (case os
       :mac (concat ["clang" "-shared" "-fPIC" "-O1" "-w" "-std=c99"] inc ["-o" lib] common
-                   (meson-sources "darwin") [shim (str root "/native/darwin.m")]
-                   ["-framework" "Foundation" "-framework" "AppKit" "-framework" "CoreGraphics" "-framework" "ImageIO"])
+                   (meson-sources "darwin") [shim (str root "/native/darwin.m") (str root "/native/metal.m")]
+                   ["-framework" "Foundation" "-framework" "AppKit" "-framework" "CoreGraphics" "-framework" "ImageIO"
+                    "-framework" "Metal" "-framework" "QuartzCore"])
       :linux (concat ["sh" "-c" (str "cc -shared -fPIC -O1 -w -std=gnu99 " (str/join " " inc) " -o " lib " "
                                      (str/join " " (concat common (meson-sources "unix") [shim]))
                                      " $(pkg-config --cflags --libs gtk+-3.0) -lm -lpthread")])
@@ -66,12 +67,12 @@
                                        (str/replace f #"^.*[/\\]([^/\\]+)[/\\]([^/\\]+)\.[a-z]+$" "$1_$2") ".o"))]
                  ["sh" "-c"
                   (str "set -e; cd " dir "; "
-                       (str/join "; " (map #(cc "gcc -std=gnu99" %) (concat common [shim (str root "/native/windows.c")]))) "; "
-                       (str/join "; " (map #(cc "g++ -std=c++11" %) (meson-sources "windows"))) "; "
+                       (str/join "; " (map #(cc "gcc -std=gnu99 -DCLOTRAN_VULKAN" %) (concat common [shim (str root "/native/windows.c") (str root "/native/vulkan.c")]))) "; "
+                       (str/join "; " (map #(cc "g++ -std=c++11" %) (conj (meson-sources "windows") (str root "/native/windows_snap.cpp")))) "; "
                        "windres -I " root "/native/libui-ng/windows " root "/native/libui-ng/windows/resources.rc -o resources.o; "
                        "g++ -shared -o " lib " *.o -static -static-libgcc -static-libstdc++ "
                        "-luser32 -lkernel32 -lgdi32 -lcomctl32 -luxtheme -lmsimg32 -lcomdlg32 -ld2d1 -ldwrite "
-                       "-lole32 -loleaut32 -loleacc -luuid -lwindowscodecs -lpthread")]))))
+                       "-lole32 -loleaut32 -loleacc -luuid -lwindowscodecs $(gcc -print-file-name=libvulkan-1.dll.a) -lpthread")]))))
 
 (defn- library
   "The native library's path, built first when these sources were never
@@ -80,15 +81,25 @@
   (let [h (str/replace (str (hash [(clotran-slurp (str root "/native/clotran_ui.c"))
                                    (clotran-slurp (str root "/native/darwin.m"))
                                    (clotran-slurp (str root "/native/windows.c"))
+                                   (clotran-slurp (str root "/native/metal.m"))
+                                   (clotran-slurp (str root "/native/g3.h"))
+                                   (clotran-slurp (str root "/native/windows_snap.cpp"))
+                                   (clotran-slurp (str root "/native/vulkan.c"))
+                                   (clotran-slurp (str root "/native/shaders/tri_frag.h"))
                                    (clotran-slurp (str root "/native/libui-ng.sha256")) os]))
                        "-" "m")
-        out (str (cache/root) "/build/c-" (clotran.host.system/getProperty "clotran.arch") "/clotran-ui-" h)
+        out (str (str/replace (cache/root) "\\" "/") "/build/c-" (clotran.host.system/getProperty "clotran.arch") "/clotran-ui-" h)
         lib (str out "/libclotran_ui." (case os :mac "dylib" :windows "dll" "so"))]
     (when-not (clotran-file-exists? lib)
       (clotran-mkdirs out)
       (check-vendored! out)
       (binding [*out* *err*] (println "clotran-ui: building libui-ng and its shim, once (about 30 s)"))
-      (sh! (build-command (str lib ".part")) out (str out "/build.log") "building libui-ng")
+      (let [cmd (build-command (str lib ".part"))]
+        ;; a shell recipe goes in a file: Windows cuts a command line at 32767
+        (if (= "sh" (first cmd))
+          (do (clotran-spit (str out "/build.sh") (last cmd))
+              (sh! ["sh" (str out "/build.sh")] out (str out "/build.log") "building libui-ng"))
+          (sh! cmd out (str out "/build.log") "building libui-ng")))
       (clotran-rename (str lib ".part") lib))
     lib))
 
@@ -122,7 +133,7 @@
 (defonce ^:private handlers (atom {}))   ; window -> fn of an event
 (defonce ^:private pump (atom nil))      ; the future draining events
 
-(def ^:private kinds {1 :move 2 :down 3 :up 4 :key 5 :resize 6 :closed 7 :text 8 :left})
+(def ^:private kinds {1 :move 2 :down 3 :up 4 :key 5 :resize 6 :closed 7 :text 8 :left 9 :scroll})
 (def ^:private ext-keys
   {1 :escape 2 :insert 3 :delete 4 :home 5 :end 6 :page-up 7 :page-down 8 :up 9 :down 10 :left 11 :right})
 
@@ -136,6 +147,7 @@
              (pos? a) (assoc :char (char a))
              (pos? b) (assoc :key (ext-keys b b)))
       :resize {:type :resize :window win :width x :height y}
+      :scroll {:type :scroll :window win :dy y}
       {:type t :window win})))
 
 (defn- dispatch [e]
@@ -280,8 +292,8 @@
 
 (defn snapshot
   "The window's drawing replayed into an offscreen picture of width by
-  height pixels, written to path as PNG: true when written (macOS only,
-  for now)."
+  height pixels, written to path: PNG on macOS, BMP on Windows (Direct2D
+  in software, no display needed). True when written."
   [w width height path]
   (= 1 (:ok (call "snapshot" (int w) (int width) (int height) (str path)))))
 
@@ -289,18 +301,67 @@
   "An event put in the window's queue as if the person made it, handled
   as theirs are: what a test drives trace and zoom with. e is an event
   map as the handler gets them (:move :down :up :key :resize)."
-  [w {:keys [type x y held button count char key width height]}]
-  (let [k ({:move 1 :down 2 :up 3 :key 4 :resize 5 :closed 6 :text 7 :left 8} type)
+  [w {:keys [type x y held button count char key width height dy]}]
+  (let [k ({:move 1 :down 2 :up 3 :key 4 :resize 5 :closed 6 :text 7 :left 8 :scroll 9} type)
         ext (into {} (map (fn [[a b]] [b a]) ext-keys))]
     (call "inject" (int w) (int k)
-          (double (or x width 0)) (double (or y height 0))
+          (double (or x width 0)) (double (or y height dy 0))
           (int (case type (:down :up) (or button 1) :key (if char (int char) 0) 0))
           (int (case type :move (or held 0) (:down :up) (or count 1) :key (if key (ext key) 0) 0)))
     w))
 
 (defn capture
   "The window as it is on screen -- frame, widgets, drawing -- read back
-  from the window itself and written to path as PNG: true when written
-  (macOS only, for now)."
+  from the window itself and written to path: true when written. macOS:
+  PNG, frame and widgets too; Windows: BMP (PrintWindow). A 3D view: the
+  frame it shows, read back from the GPU."
   [w path]
   (= 1 (:ok (call "capture" (int w) (str path)))))
+
+;; ---- the 3D view -------------------------------------------------------------
+
+(defn view3d!
+  "The window's drawing area made a 3D view, drawn by the GPU -- Metal on
+  macOS, Vulkan on Windows and Linux: true when there is one. Dragging
+  turns it (half a degree a pixel) and scrolling zooms it, in C, with no
+  trip through clotran; the events still come to the window's handler."
+  [w]
+  (= 1 (:ok (call "view3d" (int w)))))
+
+(defn- doubles-array [xs]
+  (let [v (vec xs) a (fortran/make-array "real8" (max 1 (count v)))]
+    (dotimes [i (count v)] (fortran/aset a i (double (v i))))
+    a))
+
+(defn scene3d!
+  "The 3D view's picture: {:vertices [[x y z] ..] :colours [colour ..]
+  :triangles [[i j k] ..] :lines [[[x y z] [x y z] colour] ..]
+  :background colour}, positions in the unit box (x and y -1/2..1/2, z
+  as high as the box is), colours as rgba takes them. Triangles are lit
+  from the left, front and above, as clotran-plot's surfaces are."
+  [w {:keys [vertices colours triangles lines background]}]
+  (let [rgb #(subvec (rgba %) 0 3)
+        vs (doubles-array (mapcat (fn [p c] (concat p (rgb c))) vertices colours))
+        ts (let [t (vec (apply concat triangles)) a (fortran/make-array "int4" (max 1 (count t)))]
+             (dotimes [i (count t)] (fortran/aset a i (int (t i))))
+             a)
+        ls (doubles-array (mapcat (fn [[p q c]] (concat p (rgb c) q (rgb c))) lines))
+        [r g b] (rgb (or background "black"))]
+    (call "scene3d" (int w) vs (int (count vertices)) ts (int (count triangles))
+          ls (int (count lines)) (double r) (double g) (double b))
+    w))
+
+(defn camera
+  "The 3D view's camera, {:azimuth :elevation :zoom} (degrees; zoom 1 fits
+  the box); with a map, set to it first."
+  ([w] (let [r (call "camera3d" (int w) 0 0.0 0.0 0.0)]
+         {:azimuth (:azimuth r) :elevation (:elevation r) :zoom (:scale r)}))
+  ([w {:keys [azimuth elevation zoom] :or {azimuth -35 elevation 28 zoom 1}}]
+   (call "camera3d" (int w) 1 (double azimuth) (double elevation) (double zoom))
+   (camera w)))
+
+(defn snapshot3d
+  "The 3D view drawn by the GPU offscreen at width by height and written
+  to path as PNG: true when written."
+  [w width height path]
+  (= 1 (:ok (call "snapshot3d" (int w) (int width) (int height) (str path)))))

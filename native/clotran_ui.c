@@ -22,6 +22,7 @@
 #include <string.h>
 #include <pthread.h>
 #include "ui.h"
+#include "g3.h"
 
 #define MAXWIN 64
 #define NLAYER 2
@@ -38,6 +39,11 @@ typedef struct {
 	layer layers[NLAYER];
 	double aw, ah;            // the area's size at its last draw
 	char text[4096];          // the text field's contents, as last changed
+	void *g3;                 // the 3D view (g3.h), or NULL
+	g3camera cam;             // its camera, turned by dragging, zoomed by scrolling
+	double lx, ly;            // where a drag was last
+	float *mesh[4];           // the 3D scene's arrays, as g3_mesh was last given them
+	uint32_t *idx;
 } win;
 
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
@@ -48,7 +54,7 @@ static const char *init_err;
 static uiAreaHandler handler;
 
 // ---- the event queue ------------------------------------------------------
-enum { EV_MOVE = 1, EV_DOWN, EV_UP, EV_KEY, EV_RESIZE, EV_CLOSED, EV_TEXT, EV_LEFT };
+enum { EV_MOVE = 1, EV_DOWN, EV_UP, EV_KEY, EV_RESIZE, EV_CLOSED, EV_TEXT, EV_LEFT, EV_SCROLL };
 typedef struct { int kind, win; double x, y; int a, b; } event;
 #define QN 1024
 static event q[QN];
@@ -244,6 +250,8 @@ static win *of_area(uiArea *a)
 	return NULL;
 }
 
+static void render3d(void *p);
+
 static void h_draw(uiAreaHandler *h, uiArea *a, uiAreaDrawParams *p)
 {
 	win *w = of_area(a);
@@ -255,6 +263,43 @@ static void h_draw(uiAreaHandler *h, uiArea *a, uiAreaDrawParams *p)
 	pthread_mutex_lock(&mu);
 	for (int i = 0; i < NLAYER; i++) replay(p->Context, &w->layers[i]);
 	pthread_mutex_unlock(&mu);
+	if (w->g3) render3d(w);   // a resize: the 3D view follows
+}
+
+static void render3d(void *p)
+{
+	win *w = p;
+	if (!w->open || !w->g3) return;
+	pthread_mutex_lock(&mu);
+	g3camera c = w->cam;
+	pthread_mutex_unlock(&mu);
+	g3_render(w->g3, &c);
+}
+
+// A 3D view turns as it is dragged (half a degree a pixel) and zooms as
+// it is scrolled, here in C: no trip through clotran between the mouse
+// and the picture. Its events still go to clotran, as every window's do.
+static void orbit(win *w, event e)
+{
+	if (!w->g3) return;
+	pthread_mutex_lock(&mu);
+	int again = 0;
+	if (e.kind == EV_DOWN) { w->lx = e.x; w->ly = e.y; }
+	else if (e.kind == EV_MOVE && e.b) {
+		w->cam.az -= 0.5f * (float) (e.x - w->lx);
+		w->cam.el += 0.5f * (float) (e.y - w->ly);
+		if (w->cam.el > 89) w->cam.el = 89;
+		if (w->cam.el < -89) w->cam.el = -89;
+		w->lx = e.x; w->ly = e.y;
+		again = 1;
+	} else if (e.kind == EV_SCROLL) {
+		w->cam.zoom *= expf(-0.05f * (float) e.y);
+		if (w->cam.zoom < 0.1f) w->cam.zoom = 0.1f;
+		if (w->cam.zoom > 20) w->cam.zoom = 20;
+		again = 1;
+	}
+	pthread_mutex_unlock(&mu);
+	if (again) uiQueueMain(render3d, w);
 }
 
 static void h_mouse(uiAreaHandler *h, uiArea *a, uiAreaMouseEvent *e)
@@ -262,7 +307,9 @@ static void h_mouse(uiAreaHandler *h, uiArea *a, uiAreaMouseEvent *e)
 	win *w = of_area(a);
 	if (!w) return;
 	int kind = e->Down ? EV_DOWN : e->Up ? EV_UP : EV_MOVE;
-	push((event) { kind, (int) (w - wins), e->X, e->Y, e->Down ? e->Down : e->Up, kind == EV_MOVE ? (int) e->Held1To64 : e->Count });
+	event ev = { kind, (int) (w - wins), e->X, e->Y, e->Down ? e->Down : e->Up, kind == EV_MOVE ? (int) e->Held1To64 : e->Count };
+	orbit(w, ev);
+	push(ev);
 }
 
 static void h_crossed(uiAreaHandler *h, uiArea *a, int left)
@@ -588,6 +635,19 @@ typedef struct { win *w; int W, H; const char *path; int ok; } snap;
 static void snap_main(void *p) { snap *s = p; s->ok = snapshot(s->w, s->W, s->H, s->path); }
 #endif
 
+#ifdef _WIN32
+extern int clotran_ui_snapshot_win(int W, int H, const char *path, void (*draw)(uiDrawContext *, void *), void *arg);
+static void wsnap_draw(uiDrawContext *c, void *p)
+{
+	win *w = p;
+	pthread_mutex_lock(&mu);
+	for (int i = 0; i < NLAYER; i++) replay(c, &w->layers[i]);
+	pthread_mutex_unlock(&mu);
+}
+typedef struct { win *w; int W, H; const char *path; int ok; } wsnap;
+static void wsnap_main(void *p) { wsnap *s = p; s->ok = clotran_ui_snapshot_win(s->W, s->H, s->path, wsnap_draw, s->w); }
+#endif
+
 void ui_snapshot_shim(int argc, void **argv)
 {
 	int *ok = argv[4];
@@ -598,13 +658,29 @@ void ui_snapshot_shim(int argc, void **argv)
 	snap s = { w, *(int *) argv[1], *(int *) argv[2], argv[3], 0 };
 	on_main(snap_main, &s);   // text layout wants the main thread
 	*ok = s.ok;
+#elif defined(_WIN32)
+	win *w = live(*(int *) argv[0]);
+	if (!w) return;
+	wsnap s = { w, *(int *) argv[1], *(int *) argv[2], argv[3], 0 };
+	on_main(wsnap_main, &s);
+	*ok = s.ok;
 #endif
 }
 
 #if defined(__APPLE__) || defined(_WIN32)
 extern int clotran_ui_capture(uiWindow *, const char *);
 typedef struct { win *w; const char *path; int ok; } cap;
-static void cap_main(void *p) { cap *c = p; c->ok = clotran_ui_capture(c->w->w, c->path); }
+static void cap_main(void *p)
+{
+	cap *c = p;
+	if (c->w->g3) {   // a 3D view: the frame it shows, read back from the GPU
+		pthread_mutex_lock(&mu);
+		g3camera k = c->w->cam;
+		pthread_mutex_unlock(&mu);
+		c->ok = g3_capture(c->w->g3, &k, c->path);
+	} else
+		c->ok = clotran_ui_capture(c->w->w, c->path);
+}
 #endif
 
 // ui_capture(id, path, out ok): the window as it is on screen -- its frame,
@@ -626,7 +702,127 @@ void ui_capture_shim(int argc, void **argv)
 // how a test drives trace and zoom with no mouse
 void ui_inject_shim(int argc, void **argv)
 {
-	push((event) { *(int *) argv[1], *(int *) argv[0], *(double *) argv[2], *(double *) argv[3], *(int *) argv[4], *(int *) argv[5] });
+	event e = { *(int *) argv[1], *(int *) argv[0], *(double *) argv[2], *(double *) argv[3], *(int *) argv[4], *(int *) argv[5] };
+	win *w = live(e.win);
+	if (w) orbit(w, e);
+	push(e);
+}
+
+// ---- the 3D view ------------------------------------------------------------
+#if !defined(__APPLE__) && !defined(CLOTRAN_VULKAN)
+// no GPU backend built here: the 3D routines answer that there is none
+void *g3_attach(uiArea *a) { return NULL; }
+void g3_mesh(void *h, const g3scene *s) {}
+void g3_render(void *h, const g3camera *c) {}
+int g3_snapshot(void *h, const g3camera *c, int W, int H, const char *path) { return 0; }
+int g3_capture(void *h, const g3camera *c, const char *path) { return 0; }
+#endif
+
+static void attach3d(void *p)
+{
+	win *w = p;
+	if (!w->g3) w->g3 = g3_attach(w->area);
+#ifdef __APPLE__
+	extern void clotran_ui_watch_scroll(void);
+	clotran_ui_watch_scroll();
+#elif defined(_WIN32) && defined(CLOTRAN_VULKAN)
+	extern void clotran_ui_watch_scroll_win(void *window_hwnd);
+	if (w->g3) clotran_ui_watch_scroll_win((void *) uiControlHandle(uiControl(w->w)));
+#endif
+	w->cam = (g3camera) { -35, 28, 1 };   // clotran.plot.surface's view
+}
+
+// ui_view3d(id, out ok): the window's drawing area becomes a 3D view
+void ui_view3d_shim(int argc, void **argv)
+{
+	int *ok = argv[1];
+	*ok = 0;
+	win *w = live(*(int *) argv[0]);
+	if (!w) return;
+	on_main(attach3d, w);
+	*ok = w->g3 != NULL;
+}
+
+typedef struct { win *w; g3scene s; } meshjob;
+static void mesh_main(void *p)
+{
+	meshjob *m = p;
+	g3_mesh(m->w->g3, &m->s);
+	render3d(m->w);
+}
+
+// ui_scene3d(id, verts, nv, tris, nt, lines, nl, r, g, b): the 3D view's
+// mesh -- nv vertices [x y z r g b], nt triangles of vertex indices, nl
+// lines [x y z r g b x y z r g b] -- on a ground of colour r g b
+void ui_scene3d_shim(int argc, void **argv)
+{
+	win *w = live(*(int *) argv[0]);
+	if (!w || !w->g3) return;
+	const double *v = argv[1], *l = argv[7];
+	const int *t = argv[4];
+	int nv = *(int *) argv[3], nt = *(int *) argv[6], nl = *(int *) argv[9];
+	float *pos = malloc(sizeof(float) * 3 * (nv + 1)), *col = malloc(sizeof(float) * 3 * (nv + 1));
+	float *lpos = malloc(sizeof(float) * 6 * (nl + 1)), *lcol = malloc(sizeof(float) * 6 * (nl + 1));
+	uint32_t *idx = malloc(sizeof(uint32_t) * 3 * (nt + 1));
+	for (int i = 0; i < nv; i++)
+		for (int k = 0; k < 3; k++) { pos[3 * i + k] = (float) v[6 * i + k]; col[3 * i + k] = (float) v[6 * i + 3 + k]; }
+	for (int i = 0; i < 3 * nt; i++) idx[i] = (uint32_t) (t[i] >= 0 && t[i] < nv ? t[i] : 0);
+	for (int i = 0; i < 2 * nl; i++)
+		for (int k = 0; k < 3; k++) { lpos[3 * i + k] = (float) l[6 * i + k]; lcol[3 * i + k] = (float) l[6 * i + 3 + k]; }
+	meshjob m = { w, { pos, col, nv, idx, nt, lpos, lcol, 2 * nl,
+	                   { (float) *(double *) argv[10], (float) *(double *) argv[11], (float) *(double *) argv[12] } } };
+	on_main(mesh_main, &m);
+	// the backend has copied them to the GPU
+	free(pos); free(col); free(lpos); free(lcol); free(idx);
+}
+
+// ui_camera3d(id, set, az, el, zoom, out az, out el, out zoom): the
+// camera, set first when set is 1
+void ui_camera3d_shim(int argc, void **argv)
+{
+	win *w = live(*(int *) argv[0]);
+	if (!w) return;
+	pthread_mutex_lock(&mu);
+	if (*(int *) argv[1])
+		w->cam = (g3camera) { (float) *(double *) argv[2], (float) *(double *) argv[3], (float) *(double *) argv[4] };
+	*(double *) argv[5] = w->cam.az; *(double *) argv[6] = w->cam.el; *(double *) argv[7] = w->cam.zoom;
+	pthread_mutex_unlock(&mu);
+	if (*(int *) argv[1] && w->g3) uiQueueMain(render3d, w);
+}
+
+typedef struct { win *w; int W, H; const char *path; int ok; } snap3;
+static void snap3_main(void *p)
+{
+	snap3 *s = p;
+	pthread_mutex_lock(&mu);
+	g3camera c = s->w->cam;
+	pthread_mutex_unlock(&mu);
+	s->ok = g3_snapshot(s->w->g3, &c, s->W, s->H, s->path);
+}
+
+// ui_snapshot3d(id, w, h, path, out ok): the 3D view drawn offscreen at w
+// by h and written as PNG
+void ui_snapshot3d_shim(int argc, void **argv)
+{
+	int *ok = argv[4];
+	*ok = 0;
+	win *w = live(*(int *) argv[0]);
+	if (!w || !w->g3) return;
+	snap3 s = { w, *(int *) argv[1], *(int *) argv[2], argv[3], 0 };
+	on_main(snap3_main, &s);
+	*ok = s.ok;
+}
+
+// A scroll over a window (darwin.m's monitor; vulkan.c's on Windows): its
+// 3D view zooms, and clotran hears of it
+void clotran_ui_on_scroll(void *native_window, double dy)
+{
+	for (int i = 1; i <= MAXWIN; i++)
+		if (wins[i].used && wins[i].open && uiControlHandle(uiControl(wins[i].w)) == (uintptr_t) native_window) {
+			event e = { EV_SCROLL, i, 0, dy, 0, 0 };
+			orbit(&wins[i], e);
+			push(e);
+		}
 }
 
 const char *clotran_manifest(void)
@@ -645,5 +841,9 @@ const char *clotran_manifest(void)
 		"{:name \"snapshot\" :symbol \"ui_snapshot_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0} {:name \"w\" :type :int4 :intent :in :rank 0} {:name \"h\" :type :int4 :intent :in :rank 0} {:name \"path\" :type :string :intent :in :rank 0} {:name \"ok\" :type :int4 :intent :out :rank 0}]}"
 		"{:name \"capture\" :symbol \"ui_capture_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0} {:name \"path\" :type :string :intent :in :rank 0} {:name \"ok\" :type :int4 :intent :out :rank 0}]}"
 		"{:name \"inject\" :symbol \"ui_inject_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0} {:name \"kind\" :type :int4 :intent :in :rank 0} {:name \"x\" :type :real8 :intent :in :rank 0} {:name \"y\" :type :real8 :intent :in :rank 0} {:name \"a\" :type :int4 :intent :in :rank 0} {:name \"b\" :type :int4 :intent :in :rank 0}]}"
+		"{:name \"view3d\" :symbol \"ui_view3d_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0} {:name \"ok\" :type :int4 :intent :out :rank 0}]}"
+		"{:name \"scene3d\" :symbol \"ui_scene3d_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0} {:name \"verts\" :type :real8 :intent :in :rank 1} {:name \"nv\" :type :int4 :intent :in :rank 0} {:name \"tris\" :type :int4 :intent :in :rank 1} {:name \"nt\" :type :int4 :intent :in :rank 0} {:name \"lines\" :type :real8 :intent :in :rank 1} {:name \"nl\" :type :int4 :intent :in :rank 0} {:name \"r\" :type :real8 :intent :in :rank 0} {:name \"g\" :type :real8 :intent :in :rank 0} {:name \"b\" :type :real8 :intent :in :rank 0}]}"
+		"{:name \"camera3d\" :symbol \"ui_camera3d_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0} {:name \"set\" :type :int4 :intent :in :rank 0} {:name \"az\" :type :real8 :intent :in :rank 0} {:name \"el\" :type :real8 :intent :in :rank 0} {:name \"zoom\" :type :real8 :intent :in :rank 0} {:name \"azimuth\" :type :real8 :intent :out :rank 0} {:name \"elevation\" :type :real8 :intent :out :rank 0} {:name \"scale\" :type :real8 :intent :out :rank 0}]}"
+		"{:name \"snapshot3d\" :symbol \"ui_snapshot3d_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0} {:name \"w\" :type :int4 :intent :in :rank 0} {:name \"h\" :type :int4 :intent :in :rank 0} {:name \"path\" :type :string :intent :in :rank 0} {:name \"ok\" :type :int4 :intent :out :rank 0}]}"
 		"]}";
 }

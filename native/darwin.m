@@ -21,6 +21,19 @@ int clotran_ui_capture(uiWindow *w, const char *path)
 	}
 }
 
+// libui-ng gives an area no scroll wheel: a local monitor hands each
+// scroll to clotran_ui.c, which zooms that window's 3D view. Once.
+extern void clotran_ui_on_scroll(void *native_window, double dy);
+void clotran_ui_watch_scroll(void)
+{
+	static id monitor;
+	if (monitor) return;
+	monitor = [[NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskScrollWheel handler:^NSEvent *(NSEvent *e) {
+		clotran_ui_on_scroll((__bridge void *) [e window], -[e scrollingDeltaY] * ([e hasPreciseScrollingDeltas] ? 0.1 : 1.0));
+		return e;
+	}] retain];
+}
+
 // uiMainStep returns on an event, and a function uiQueueMain ran (a
 // dispatch block) is none: an application-defined event, posted, makes it
 // return so the loop looks at its state again.

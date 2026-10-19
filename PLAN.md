@@ -56,6 +56,24 @@ they are wanted:
 Each answer that needs core is a change there, gated and with its own
 oracle case, as clotran's own work is.
 
+**Settled, 2026-10-19** (clotran's PLAN step 37 has the core side):
+1. The process's first thread serves a one-slot mailbox (core,
+   `fortran/main-thread*`, `model/mainbox.lisp`); clotran-ui hands it
+   `clotran_ui_main`, libui-ng's loop, which runs until its last window
+   closes with no job pending, and is handed again for the next window.
+   A program thread asks the loop for work by `uiQueueMain` and waits
+   (`on_main`), refused at once when the loop is not running. The process
+   ends when the program has ended and the loop has returned, as clj's
+   does with a JFrame open.
+2. No callbacks into the evaluator: drawing is a display list copied into
+   C and replayed by the draw callback; mouse, key, text, resize and close
+   are events in a queue a clotran thread drains. Nothing re-enters.
+3. clotran-ui builds its C itself, into clotran's cache, on first load,
+   and opens it with `fortran/load-package*`: a C library exporting
+   `clotran_manifest` and `NAME_shim(argc, argv)` is a package already.
+4. Not needed yet: redraw is on demand, and the native side never waits
+   on the collector.
+
 ## Milestones
 
 1. A window from the REPL, a canvas in it, lines and text drawn into it,

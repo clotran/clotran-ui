@@ -1,0 +1,306 @@
+(ns clotran.ui
+  "Windows to draw in, from the REPL or a program (PLAN.md): a window is a
+  number, drawing is a display list -- plain data -- handed to it, and what
+  the person does (mouse, keys, typing, resizing, closing) comes back as
+  event maps to a function.
+
+    (def w (ui/window {:title \"hello\" :on-event prn}))
+    (ui/draw! w [{:op :rect :x 0 :y 0 :w 600 :h 400 :fill \"#0f0f12\"}
+                 {:op :polyline :points [[10 10] [300 200]] :width 2 :colour \"#58C4DD\"}
+                 {:op :text :x 20 :y 30 :text \"hi\" :size 14 :colour \"white\"}])
+    (ui/close! w)
+
+  The native half (native/clotran_ui.c over libui-ng, vendored) is built
+  the first time this namespace loads, into clotran's cache, and opened as
+  a clotran package. libui-ng runs on the process's first thread, handed
+  to it by fortran/main-thread*; a program that ends with a window open
+  stays alive until the window closes, as clj does."
+  (:require [clojure.string :as str]
+            [clotran.cache :as cache]))
+
+;; ---- building and opening the native half ----------------------------------
+
+(def ^:private root
+  ;; this repository: two directories above this file
+  (str/replace (clotran-resource "clotran/ui.cljf") #"[/\\]src[/\\]clotran[/\\]ui\.cljf$" ""))
+
+(def ^:private os
+  (let [o (str (clotran.host.system/getProperty "os.name"))]
+    (cond (str/starts-with? o "Mac") :mac (str/starts-with? o "Windows") :windows :else :linux)))
+
+(defn- meson-sources
+  "The sources a vendored meson.build lists: libui-ng's own list, read
+  rather than copied, so the vendored tree stays the one truth."
+  [dir]
+  (mapv #(str root "/native/libui-ng/" %)
+        (map second (re-seq #"'((?:common|darwin|unix|windows)/[A-Za-z0-9_]+\.(?:c|m|cpp))'"
+                            (clotran-slurp (str root "/native/libui-ng/" dir "/meson.build"))))))
+
+(defn- sh! [argv dir log what]
+  (when-not (zero? (clotran-run (vec argv) dir log nil true))
+    (throw (ex-info (str "clotran-ui: " what " failed:\n" (clotran-slurp log)) {:log log}))))
+
+(defn- check-vendored!
+  "libui-ng's vendored files against their sha256 pins (native/libui-ng.sha256)."
+  [out]
+  (let [tool (if (= os :mac) ["shasum" "-a" "256" "-c" "--quiet"] ["sha256sum" "-c" "--quiet"])]
+    (sh! (conj tool (str root "/native/libui-ng.sha256")) (str root "/native/libui-ng")
+          (str out "/sha256.log") "the sha256 check of the vendored libui-ng")))
+
+(defn- build-command [lib]
+  (let [inc ["-I" (str root "/native/libui-ng")]
+        shim (str root "/native/clotran_ui.c")
+        common (meson-sources "common")]
+    (case os
+      :mac (concat ["clang" "-shared" "-fPIC" "-O1" "-w" "-std=c99"] inc ["-o" lib] common
+                   (meson-sources "darwin") [shim (str root "/native/darwin.m")]
+                   ["-framework" "Foundation" "-framework" "AppKit" "-framework" "CoreGraphics" "-framework" "ImageIO"])
+      :linux (concat ["sh" "-c" (str "cc -shared -fPIC -O1 -w -std=gnu99 " (str/join " " inc) " -o " lib " "
+                                     (str/join " " (concat common (meson-sources "unix") [shim]))
+                                     " $(pkg-config --cflags --libs gtk+-3.0) -lm -lpthread")])
+      ;; MinGW-w64 (MSYS2 UCRT64): C and C++ to objects beside the library,
+      ;; the Common Controls 6 manifest as a resource, then one DLL with the
+      ;; C++ and thread runtimes linked in, so it needs no MinGW DLL
+      :windows (let [dir (str/replace lib #"[/\\][^/\\]*$" "")
+                     cc (fn [c f] (str c " -c -O1 -w " (str/join " " inc) " " f " -o "
+                                       (str/replace f #"^.*[/\\]([^/\\]+)[/\\]([^/\\]+)\.[a-z]+$" "$1_$2") ".o"))]
+                 ["sh" "-c"
+                  (str "set -e; cd " dir "; "
+                       (str/join "; " (map #(cc "gcc -std=gnu99" %) (concat common [shim (str root "/native/windows.c")]))) "; "
+                       (str/join "; " (map #(cc "g++ -std=c++11" %) (meson-sources "windows"))) "; "
+                       "windres -I " root "/native/libui-ng/windows " root "/native/libui-ng/windows/resources.rc -o resources.o; "
+                       "g++ -shared -o " lib " *.o -static -static-libgcc -static-libstdc++ "
+                       "-luser32 -lkernel32 -lgdi32 -lcomctl32 -luxtheme -lmsimg32 -lcomdlg32 -ld2d1 -ldwrite "
+                       "-lole32 -loleaut32 -loleacc -luuid -lwindowscodecs -lpthread")]))))
+
+(defn- library
+  "The native library's path, built first when these sources were never
+  built: keyed by the shim's text, the pins and the system."
+  []
+  (let [h (str/replace (str (hash [(clotran-slurp (str root "/native/clotran_ui.c"))
+                                   (clotran-slurp (str root "/native/darwin.m"))
+                                   (clotran-slurp (str root "/native/windows.c"))
+                                   (clotran-slurp (str root "/native/libui-ng.sha256")) os]))
+                       "-" "m")
+        out (str (cache/root) "/build/c-" (clotran.host.system/getProperty "clotran.arch") "/clotran-ui-" h)
+        lib (str out "/libclotran_ui." (case os :mac "dylib" :windows "dll" "so"))]
+    (when-not (clotran-file-exists? lib)
+      (clotran-mkdirs out)
+      (check-vendored! out)
+      (binding [*out* *err*] (println "clotran-ui: building libui-ng and its shim, once (about 30 s)"))
+      (sh! (build-command (str lib ".part")) out (str out "/build.log") "building libui-ng")
+      (clotran-rename (str lib ".part") lib))
+    lib))
+
+(defonce ^:private native
+  (delay (let [{:keys [handle manifest]} (fortran/load-package* (library))]
+           {:handle handle
+            :routines (into {} (map (juxt :name identity) (:routines manifest)))})))
+
+(defn- call [routine & args]
+  (let [{:keys [handle routines]} @native]
+    (fortran/call-package* handle (routines routine) (vec args))))
+
+;; ---- the event loop on the main thread --------------------------------------
+
+(defn- ensure-loop!
+  "libui-ng's loop running on the main thread: handed to it when it is not
+  (it returns when the last window closes, and is handed again for the
+  next)."
+  []
+  (when (zero? (:running (call "running")))
+    ;; false when the slot still holds the loop handed earlier, not yet
+    ;; started -- or when nothing serves, which start's wait then reports
+    (fortran/main-thread* (:handle @native) "clotran_ui_main")
+    (let [ok (:ok (call "start" 10000))]
+      (when-not (= 1 ok)
+        (throw (ex-info (if (zero? ok) "clotran-ui: libui-ng would not start"
+                            "clotran-ui: the event loop did not start in 10 s (is the main thread free? clotran-bin started without its program thread cannot have windows)") {}))))))
+
+;; ---- events --------------------------------------------------------------
+
+(defonce ^:private handlers (atom {}))   ; window -> fn of an event
+(defonce ^:private pump (atom nil))      ; the future draining events
+
+(def ^:private kinds {1 :move 2 :down 3 :up 4 :key 5 :resize 6 :closed 7 :text 8 :left})
+(def ^:private ext-keys
+  {1 :escape 2 :insert 3 :delete 4 :home 5 :end 6 :page-up 7 :page-down 8 :up 9 :down 10 :left 11 :right})
+
+(defn- event-map [{:keys [kind win x y a b]}]
+  (let [t (kinds kind)]
+    (case t
+      (:move :down :up) (cond-> {:type t :window win :x x :y y}
+                          (= t :move) (assoc :held b)
+                          (not= t :move) (assoc :button a :count b))
+      :key (cond-> {:type :key :window win}
+             (pos? a) (assoc :char (char a))
+             (pos? b) (assoc :key (ext-keys b b)))
+      :resize {:type :resize :window win :width x :height y}
+      {:type t :window win})))
+
+(defn- dispatch [e]
+  (when-let [f (get @handlers (:window e))]
+    (try (f e)
+         (catch :default ex
+           (binding [*out* *err*] (println "clotran-ui: the handler of window" (:window e) "threw:" (ex-message ex)))))))
+
+(defn- drain
+  "Events, to their windows' handlers, until no window is open."
+  []
+  (loop []
+    (let [r (call "next-event" 200)]
+      (when (pos? (:kind r))
+        (let [e (event-map r)]
+          (dispatch e)
+          (when (= :closed (:type e)) (swap! handlers dissoc (:window e)))))
+      (if (or (pos? (:kind r)) (pos? (:n (call "open-count"))))
+        (recur)
+        (reset! pump nil)))))
+
+(defn- ensure-pump! []
+  (locking pump
+    (when-not @pump (reset! pump (future (drain))))))
+
+;; ---- windows -------------------------------------------------------------
+
+(defn window
+  "A new window, open and shown; answers its number. Options: :title,
+  :width and :height (600 by 400), :entry true for a text field above the
+  drawing area (its changes come as {:type :text}, entry-text reads it),
+  and :on-event, a function of each event map: {:type :move :x :y :held},
+  {:type :down/:up :x :y :button :count}, {:type :key :char or :key},
+  {:type :resize :width :height}, {:type :text}, {:type :left},
+  {:type :closed}. A handler runs on clotran's event thread."
+  [{:keys [title width height entry on-event] :or {title "clotran" width 600 height 400}}]
+  (let [id (loop [tries 0]
+             (ensure-loop!)
+             (let [id (:id (call "window" (str title) (int width) (int height) (if entry 1 0)))]
+               ;; -1: the loop stopped (its last window closed) as we asked
+               (if (and (neg? id) (< tries 3)) (recur (inc tries)) id)))]
+    (when (neg? id) (throw (ex-info "clotran-ui: the event loop would not stay up" {})))
+    (when (zero? id) (throw (ex-info "clotran-ui: too many windows (64)" {})))
+    (when on-event (swap! handlers assoc id on-event))
+    (ensure-pump!)
+    id))
+
+(defn on-event!
+  "f the window's event handler from now on."
+  [w f]
+  (swap! handlers assoc w f)
+  w)
+
+;; ---- the display list ------------------------------------------------------
+
+(def ^:private names
+  {"black" "#000000" "silver" "#c0c0c0" "gray" "#808080" "white" "#ffffff" "maroon" "#800000"
+   "red" "#ff0000" "purple" "#800080" "fuchsia" "#ff00ff" "green" "#008000" "lime" "#00ff00"
+   "olive" "#808000" "yellow" "#ffff00" "navy" "#000080" "blue" "#0000ff" "teal" "#008080" "aqua" "#00ffff"})
+
+(defn rgba
+  "A colour -- #rgb, #rrggbb, #rrggbbaa, one of CSS 1's sixteen names, or
+  [r g b a] in 0..1 -- as [r g b a], its alpha times opacity."
+  ([c] (rgba c 1.0))
+  ([c opacity]
+   (if (vector? c)
+     (update c 3 * opacity)
+     (let [h (str/lower-case (get names (str/lower-case c) c))
+           h (if (= 4 (count h)) (apply str "#" (mapcat #(vector % %) (subs h 1))) h)
+           hex "0123456789abcdef"
+           byte #(/ (+ (* 16 (str/index-of hex (subs h % (+ % 1)))) (str/index-of hex (subs h (+ % 1) (+ % 2)))) 255.0)]
+       [(byte 1) (byte 3) (byte 5) (* opacity (if (= 9 (count h)) (byte 7) 1.0))]))))
+
+(defn- encode
+  "Marks as the native display list: [doubles strings]."
+  [marks]
+  (let [strs (volatile! [])
+        col (fn [m k] (rgba (k m) (:opacity m 1.0)))
+        pts (fn [ps] (mapcat (fn [[x y]] [x y]) ps))
+        ds (mapcat (fn [{:keys [op] :as m}]
+                     (case op
+                       :rect (concat [1 (:x m) (:y m) (:w m) (:h m)] (col m :fill))
+                       :polyline (concat [2 (count (:points m)) (:width m 1)] (col m :colour) (pts (:points m)))
+                       :polygon (concat [3 (count (:points m))] (col m :fill) [(:width m 0)]
+                                        (if (:stroke m) (rgba (:stroke m) (:stroke-opacity m 1.0)) [0 0 0 0])
+                                        (pts (:points m)))
+                       :text (do (vswap! strs conj (str/replace (str (:text m)) "\u001f" " "))
+                                 (concat [4 (:x m) (:y m) ({:start 0 :middle 1 :end 2} (:anchor m :start) 0)
+                                          (:size m 14) (if (:italic m) 1 0)]
+                                         (col m :colour) [(dec (count @strs))]))))
+                   marks)
+        ds (vec ds)
+        a (fortran/make-array "real8" (max 1 (count ds)))]
+    (dotimes [i (count ds)] (fortran/aset a i (double (ds i))))
+    [a (count ds) (str/join "\u001f" @strs)]))
+
+(defn draw!
+  "The window's drawing replaced by marks -- maps with :op one of
+    :rect      :x :y :w :h :fill
+    :polyline  :points [[x y] ..] :width :colour
+    :polygon   :points :fill, and to outline it :width :stroke :stroke-opacity
+    :text      :x :y (the baseline's start) :text :size :colour :anchor (:start
+               :middle :end) :italic
+  each with an :opacity -- in pixels from the area's top left. :layer 1
+  draws over layer 0 (the default) and is replaced on its own: a cursor
+  over a picture. :font is the family for text. Answers w."
+  [w marks & {:keys [layer font] :or {layer 0 font "Georgia"}}]
+  (let [[a n s] (encode marks)]
+    (call "scene" (int w) (int layer) a (int n) s (str font))
+    w))
+
+(defn set-text!
+  "The window's label (:label, under its text field), text field (:entry)
+  or title (:title) set to s."
+  [w which s]
+  (call "text" (int w) (int ({:label 0 :entry 1 :title 2} which)) (str s))
+  w)
+
+(defn entry-text
+  "What the window's text field holds now."
+  [w]
+  (let [buf (fortran/make-array "int4" 4096)
+        n (:n (call "entry-text" (int w) buf))
+        bs (byte-array (map #(unchecked-byte (fortran/aget buf %)) (range n)))]
+    (clotran-utf8-string bs 0 n)))
+
+(defn close!
+  "The window closed, as by its close button."
+  [w]
+  (call "close" (int w))
+  nil)
+
+(defn open-count [] (:n (call "open-count")))
+
+(defn wait
+  "Waits until every window is closed (or ms milliseconds); answers how
+  many are still open. A program's last line, when it should end with its
+  windows -- though a program that just ends stays alive while one is
+  open."
+  ([] (wait -1))
+  ([ms] (:n (call "wait" (int ms)))))
+
+(defn snapshot
+  "The window's drawing replayed into an offscreen picture of width by
+  height pixels, written to path as PNG: true when written (macOS only,
+  for now)."
+  [w width height path]
+  (= 1 (:ok (call "snapshot" (int w) (int width) (int height) (str path)))))
+
+(defn inject!
+  "An event put in the window's queue as if the person made it, handled
+  as theirs are: what a test drives trace and zoom with. e is an event
+  map as the handler gets them (:move :down :up :key :resize)."
+  [w {:keys [type x y held button count char key width height]}]
+  (let [k ({:move 1 :down 2 :up 3 :key 4 :resize 5 :closed 6 :text 7 :left 8} type)
+        ext (into {} (map (fn [[a b]] [b a]) ext-keys))]
+    (call "inject" (int w) (int k)
+          (double (or x width 0)) (double (or y height 0))
+          (int (case type (:down :up) (or button 1) :key (if char (int char) 0) 0))
+          (int (case type :move (or held 0) (:down :up) (or count 1) :key (if key (ext key) 0) 0)))
+    w))
+
+(defn capture
+  "The window as it is on screen -- frame, widgets, drawing -- read back
+  from the window itself and written to path as PNG: true when written
+  (macOS only, for now)."
+  [w path]
+  (= 1 (:ok (call "capture" (int w) (str path)))))

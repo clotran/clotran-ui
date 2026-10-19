@@ -32,6 +32,8 @@ static NSString *src = @
 	"}\n"
 	"fragment float4 fs_line(O in [[stage_in]]) { return float4(in.c, 1.0); }\n";
 
+const char *clotran_ui_g3_error = "";
+
 typedef struct {
 	id<MTLDevice> dev;
 	id<MTLCommandQueue> q;
@@ -64,11 +66,11 @@ void *g3_attach(uiArea *a)
 	@autoreleasepool {
 		m3 *m = calloc(1, sizeof *m);
 		m->dev = MTLCreateSystemDefaultDevice();
-		if (!m->dev) { free(m); return NULL; }
+		if (!m->dev) { clotran_ui_g3_error = "no Metal device here"; free(m); return NULL; }
 		m->q = [m->dev newCommandQueue];
 		NSError *e = nil;
 		id<MTLLibrary> lib = [m->dev newLibraryWithSource:src options:nil error:&e];
-		if (!lib) { NSLog(@"clotran-ui metal: %@", e); free(m); return NULL; }
+		if (!lib) { clotran_ui_g3_error = "the Metal shaders would not compile"; NSLog(@"clotran-ui metal: %@", e); free(m); return NULL; }
 		m->tri = pipeline(m, lib, @"fs_tri");
 		m->line = pipeline(m, lib, @"fs_line");
 		MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];

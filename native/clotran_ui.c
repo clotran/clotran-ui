@@ -715,6 +715,7 @@ void ui_inject_shim(int argc, void **argv)
 // ---- the 3D view ------------------------------------------------------------
 #if !defined(__APPLE__) && !defined(CLOTRAN_VULKAN)
 // no GPU backend built here: the 3D routines answer that there is none
+const char *clotran_ui_g3_error = "this build of clotran-ui has no 3D view for this system";
 void *g3_attach(uiArea *a) { return NULL; }
 void g3_mesh(void *h, const g3scene *s) {}
 void g3_render(void *h, const g3camera *c) {}
@@ -843,6 +844,16 @@ void ui_area_size_shim(int argc, void **argv)
 	pthread_mutex_unlock(&mu);
 }
 
+// ui_g3_error(buf, out n): why there is no 3D view, as bytes in buf
+extern const char *clotran_ui_g3_error;
+void ui_g3_error_shim(int argc, void **argv)
+{
+	int *buf = argv[0], cap = *(int *) argv[1], *n = argv[2];
+	int i = 0;
+	for (; clotran_ui_g3_error[i] && i < cap; i++) buf[i] = (unsigned char) clotran_ui_g3_error[i];
+	*n = i;
+}
+
 const char *clotran_manifest(void)
 {
 	return "{:package \"clotran.ui.native\" :routines ["
@@ -864,5 +875,6 @@ const char *clotran_manifest(void)
 		"{:name \"camera3d\" :symbol \"ui_camera3d_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0} {:name \"set\" :type :int4 :intent :in :rank 0} {:name \"az\" :type :real8 :intent :in :rank 0} {:name \"el\" :type :real8 :intent :in :rank 0} {:name \"zoom\" :type :real8 :intent :in :rank 0} {:name \"azimuth\" :type :real8 :intent :out :rank 0} {:name \"elevation\" :type :real8 :intent :out :rank 0} {:name \"scale\" :type :real8 :intent :out :rank 0}]}"
 		"{:name \"snapshot3d\" :symbol \"ui_snapshot3d_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0} {:name \"w\" :type :int4 :intent :in :rank 0} {:name \"h\" :type :int4 :intent :in :rank 0} {:name \"path\" :type :string :intent :in :rank 0} {:name \"ok\" :type :int4 :intent :out :rank 0}]}"
 		"{:name \"area-size\" :symbol \"ui_area_size_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0} {:name \"width\" :type :real8 :intent :out :rank 0} {:name \"height\" :type :real8 :intent :out :rank 0}]}"
+		"{:name \"g3-error\" :symbol \"ui_g3_error_shim\" :args [{:name \"buf\" :type :int4 :intent :inout :rank 1} {:name \"n\" :type :int4 :intent :out :rank 0}]}"
 		"]}";
 }

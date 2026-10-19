@@ -9,6 +9,7 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <windows.h>
 #include <commctrl.h>
+#define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,6 +19,54 @@
 #include "shaders/mesh_vert.h"
 #include "shaders/tri_frag.h"
 #include "shaders/line_frag.h"
+
+// Vulkan is LOADED, not linked: vulkan-1.dll comes with a GPU's driver, and
+// a machine without one must still open windows and draw in 2D -- linked,
+// the whole library would fail to load there. Every function is looked up
+// by vkGetInstanceProcAddr; g3_attach says why when there is none.
+#define VK_FUNCTIONS(X) \
+	X(vkAcquireNextImageKHR) X(vkAllocateCommandBuffers) X(vkAllocateMemory) X(vkBeginCommandBuffer) \
+	X(vkBindBufferMemory) X(vkBindImageMemory) X(vkCmdBeginRenderPass) X(vkCmdBindIndexBuffer) \
+	X(vkCmdBindPipeline) X(vkCmdBindVertexBuffers) X(vkCmdCopyImageToBuffer) X(vkCmdDraw) \
+	X(vkCmdDrawIndexed) X(vkCmdEndRenderPass) X(vkCmdPipelineBarrier) X(vkCmdPushConstants) \
+	X(vkCmdSetScissor) X(vkCmdSetViewport) X(vkCreateBuffer) X(vkCreateCommandPool) X(vkCreateDevice) \
+	X(vkCreateFence) X(vkCreateFramebuffer) X(vkCreateGraphicsPipelines) X(vkCreateImage) \
+	X(vkCreateImageView) X(vkCreatePipelineLayout) X(vkCreateRenderPass) X(vkCreateSemaphore) \
+	X(vkCreateShaderModule) X(vkCreateSwapchainKHR) X(vkCreateWin32SurfaceKHR) X(vkDestroyBuffer) \
+	X(vkDestroyFramebuffer) X(vkDestroyImage) X(vkDestroyImageView) X(vkDestroyShaderModule) \
+	X(vkDestroySwapchainKHR) X(vkDeviceWaitIdle) X(vkEndCommandBuffer) X(vkEnumeratePhysicalDevices) \
+	X(vkFreeMemory) X(vkGetBufferMemoryRequirements) X(vkGetDeviceQueue) X(vkGetImageMemoryRequirements) \
+	X(vkGetPhysicalDeviceMemoryProperties) X(vkGetPhysicalDeviceQueueFamilyProperties) \
+	X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) X(vkGetPhysicalDeviceSurfaceSupportKHR) \
+	X(vkGetSwapchainImagesKHR) X(vkMapMemory) X(vkQueuePresentKHR) X(vkQueueSubmit) \
+	X(vkResetCommandBuffer) X(vkResetFences) X(vkUnmapMemory) X(vkWaitForFences)
+#define VK_DECLARE(f) static PFN_##f f;
+VK_FUNCTIONS(VK_DECLARE)
+static PFN_vkGetInstanceProcAddr gipa;
+static PFN_vkCreateInstance vkCreateInstance;
+const char *clotran_ui_g3_error = "";
+
+// the loader, and the one function needed before an instance; 0 without
+static int load_loader(void)
+{
+	if (gipa) return 1;
+	HMODULE lib = LoadLibraryA("vulkan-1.dll");
+	if (!lib) { clotran_ui_g3_error = "no Vulkan here (vulkan-1.dll, which a GPU driver installs, is missing)"; return 0; }
+	gipa = (PFN_vkGetInstanceProcAddr) (void *) GetProcAddress(lib, "vkGetInstanceProcAddr");
+	if (gipa) vkCreateInstance = (PFN_vkCreateInstance) gipa(NULL, "vkCreateInstance");
+	if (!gipa || !vkCreateInstance) { clotran_ui_g3_error = "vulkan-1.dll has no vkGetInstanceProcAddr"; return 0; }
+	return 1;
+}
+
+// every other function, through the instance; 0 when one is missing
+static int load_functions(VkInstance inst)
+{
+	int ok = 1;
+#define VK_LOAD(f) f = (PFN_##f) gipa(inst, #f); if (!f) ok = 0;
+	VK_FUNCTIONS(VK_LOAD)
+	if (!ok) clotran_ui_g3_error = "this Vulkan lacks a function the 3D view needs";
+	return ok;
+}
 
 typedef struct { VkBuffer b; VkDeviceMemory m; } vbuf;
 typedef struct { VkImage i; VkDeviceMemory m; VkImageView v; } vimg;
@@ -193,10 +242,12 @@ void *g3_attach(uiArea *a)
 	v->child = CreateWindowExW(0, L"clotranVulkan", L"", WS_CHILD | WS_VISIBLE, 0, 0, r.right, r.bottom,
 	                           v->area, NULL, GetModuleHandle(NULL), NULL);
 	SetWindowLongPtrW(v->child, GWLP_USERDATA, (LONG_PTR) v);
+	if (!load_loader()) goto fail;
 	const char *ext[2] = { VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME };
 	VkApplicationInfo app = { VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "clotran-ui", 1, "clotran-ui", 1, VK_API_VERSION_1_0 };
 	VkInstanceCreateInfo ii = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, NULL, 0, &app, 0, NULL, 2, ext };
-	if (vkCreateInstance(&ii, NULL, &v->inst) != VK_SUCCESS) goto fail;
+	if (vkCreateInstance(&ii, NULL, &v->inst) != VK_SUCCESS) { clotran_ui_g3_error = "Vulkan would not start (vkCreateInstance)"; goto fail; }
+	if (!load_functions(v->inst)) goto fail;
 	VkWin32SurfaceCreateInfoKHR si = { VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR, NULL, 0, GetModuleHandle(NULL), v->child };
 	if (vkCreateWin32SurfaceKHR(v->inst, &si, NULL, &v->surf) != VK_SUCCESS) goto fail;
 	uint32_t n = 8;
@@ -212,7 +263,7 @@ void *g3_attach(uiArea *a)
 			if ((qp[k].queueFlags & VK_QUEUE_GRAPHICS_BIT) && present) { v->pd = pds[i]; v->qf = k; break; }
 		}
 	}
-	if (!v->pd) goto fail;
+	if (!v->pd) { clotran_ui_g3_error = "no GPU here can draw to a window with Vulkan"; goto fail; }
 	float prio = 1;
 	VkDeviceQueueCreateInfo qi = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, v->qf, 1, &prio };
 	const char *dext[1] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };

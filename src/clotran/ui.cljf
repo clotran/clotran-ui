@@ -15,7 +15,8 @@
   a clotran package. libui-ng runs on the process's first thread, handed
   to it by fortran/main-thread*; a program that ends with a window open
   stays alive until the window closes, as clj does."
-  (:require [clojure.string :as str]
+  (:require [clojure.edn]
+            [clojure.string :as str]
             [clotran.cache :as cache]))
 
 ;; ---- building and opening the native half ----------------------------------
@@ -72,34 +73,91 @@
                        "windres -I " root "/native/libui-ng/windows " root "/native/libui-ng/windows/resources.rc -o resources.o; "
                        "g++ -shared -o " lib " *.o -static -static-libgcc -static-libstdc++ "
                        "-luser32 -lkernel32 -lgdi32 -lcomctl32 -luxtheme -lmsimg32 -lcomdlg32 -ld2d1 -ldwrite "
-                       "-lole32 -loleaut32 -loleacc -luuid -lwindowscodecs $(gcc -print-file-name=libvulkan-1.dll.a) -lpthread")]))))
+                       "-lole32 -loleaut32 -loleacc -luuid -lwindowscodecs -lpthread")]))))
+
+(defn source-hash
+  "The native sources' identity on this system: what a library built from
+  them is cached under, and what a prebuilt one must have been built from.
+  Line ends are made LF first, so a checkout with CRLF ones is the same."
+  []
+  (str/replace
+   (str (hash (conj (mapv #(str/replace (clotran-slurp (str root "/native/" %)) "\r\n" "\n")
+                          ["clotran_ui.c" "darwin.m" "windows.c" "metal.m" "g3.h" "windows_snap.cpp" "vulkan.c"
+                           "shaders/mesh_vert.h" "shaders/tri_frag.h" "shaders/line_frag.h" "libui-ng.sha256"])
+                    os)))
+   "-" "m"))
+
+(def ^:private platform (str (name os) "-" (clotran.host.system/getProperty "clotran.arch")))
+
+(defn- on-path? [cmd]
+  (let [sep (clotran.host.system/getProperty "path.separator")]
+    (some (fn [d] (some #(= :file (clotran-file-kind %)) [(str d "/" cmd) (str d "/" cmd ".exe")]))
+          (str/split (or (clotran.host.system/getenv "PATH") "") (re-pattern (str "\\" sep))))))
+
+(defn- compiler?
+  "Whether this machine can build the native half: Apple's command-line
+  tools on macOS (xcode-select -p answers where they are), MinGW-w64's gcc,
+  g++ and windres on Windows, a cc on Linux."
+  [out]
+  (case os
+    :mac (zero? (clotran-run ["xcode-select" "-p"] out (str out "/xcode-select.log") nil true))
+    :windows (every? on-path? ["gcc" "g++" "windres" "sh"])
+    (boolean (on-path? "cc"))))
+
+(defn- sha256
+  "A file's sha256, by the system's own tool: shasum on macOS, certutil on
+  Windows (in every Windows), sha256sum elsewhere."
+  [f out]
+  (let [log (str out "/sha256-of.log")]
+    (sh! (case os :mac ["shasum" "-a" "256" f] :windows ["certutil" "-hashfile" f "SHA256"] ["sha256sum" f])
+         out log "taking a sha256")
+    ;; shasum: "hex  file"; certutil: the hex alone on a line, in pairs on old Windows
+    (some (fn [l] (let [l (str/lower-case (str/trim l))]
+                    (or (re-matches #"[0-9a-f]{64}" (first (str/split l #"\s+")))
+                        (re-matches #"[0-9a-f]{64}" (str/replace l #"\s" "")))))
+          (str/split-lines (clotran-slurp log)))))
+
+(defn- fetch-prebuilt!
+  "The prebuilt library for this platform (native/prebuilt.edn: its URL, its
+  sha256, and the sources it was built from), downloaded to lib and checked;
+  refused on any mismatch."
+  [lib out h]
+  (let [p (get (clojure.edn/read-string (clotran-slurp (str root "/native/prebuilt.edn"))) platform)]
+    (when-not p
+      (throw (ex-info (str "clotran-ui: no C compiler here and no prebuilt library for " platform
+                           " -- install one (Windows: MSYS2 UCRT64; macOS: xcode-select --install)") {})))
+    (when-not (= h (:source p))
+      (throw (ex-info (str "clotran-ui: no C compiler here, and the prebuilt library for " platform
+                           " was built from other sources than these (" (:source p) ", these " h ")") {})))
+    (binding [*out* *err*] (println "clotran-ui: no C compiler here; fetching the prebuilt library for" platform))
+    (sh! ["curl" "-fsSL" "-o" (str lib ".part") (:url p)] out (str out "/fetch.log") (str "fetching " (:url p)))
+    (let [got (sha256 (str lib ".part") out)]
+      (when-not (= got (:sha256 p))
+        (clotran-delete (str lib ".part"))
+        (throw (ex-info (str "clotran-ui: the prebuilt library's sha256 is " got ", not the pinned " (:sha256 p) "; refused") {}))))))
 
 (defn- library
-  "The native library's path, built first when these sources were never
-  built: keyed by the shim's text, the pins and the system."
+  "The native library's path, made first when there is none for these
+  sources: built from them when this machine has a C compiler (or
+  CLOTRAN_UI_NATIVE=build), else the pinned prebuilt one fetched and
+  checked (or CLOTRAN_UI_NATIVE=prebuilt)."
   []
-  (let [h (str/replace (str (hash [(clotran-slurp (str root "/native/clotran_ui.c"))
-                                   (clotran-slurp (str root "/native/darwin.m"))
-                                   (clotran-slurp (str root "/native/windows.c"))
-                                   (clotran-slurp (str root "/native/metal.m"))
-                                   (clotran-slurp (str root "/native/g3.h"))
-                                   (clotran-slurp (str root "/native/windows_snap.cpp"))
-                                   (clotran-slurp (str root "/native/vulkan.c"))
-                                   (clotran-slurp (str root "/native/shaders/tri_frag.h"))
-                                   (clotran-slurp (str root "/native/libui-ng.sha256")) os]))
-                       "-" "m")
+  (let [h (source-hash)
         out (str (str/replace (cache/root) "\\" "/") "/build/c-" (clotran.host.system/getProperty "clotran.arch") "/clotran-ui-" h)
-        lib (str out "/libclotran_ui." (case os :mac "dylib" :windows "dll" "so"))]
+        lib (str out "/libclotran_ui." (case os :mac "dylib" :windows "dll" "so"))
+        want (clotran.host.system/getenv "CLOTRAN_UI_NATIVE")]
     (when-not (clotran-file-exists? lib)
       (clotran-mkdirs out)
-      (check-vendored! out)
-      (binding [*out* *err*] (println "clotran-ui: building libui-ng and its shim, once (about 30 s)"))
-      (let [cmd (build-command (str lib ".part"))]
-        ;; a shell recipe goes in a file: Windows cuts a command line at 32767
-        (if (= "sh" (first cmd))
-          (do (clotran-spit (str out "/build.sh") (last cmd))
-              (sh! ["sh" (str out "/build.sh")] out (str out "/build.log") "building libui-ng"))
-          (sh! cmd out (str out "/build.log") "building libui-ng")))
+      (if (or (= want "build") (and (not= want "prebuilt") (compiler? out)))
+        (do (check-vendored! out)
+            (binding [*out* *err*] (println "clotran-ui: building libui-ng and its shim, once (about 30 s)"))
+            (let [cmd (build-command (str lib ".part"))]
+              ;; a shell recipe goes in a file: Windows cuts a command line at 32767
+              (if (= "sh" (first cmd))
+                (do (clotran-spit (str out "/build.sh") (last cmd))
+                    (sh! ["sh" (str out "/build.sh")] out (str out "/build.log") "building libui-ng"))
+                (sh! cmd out (str out "/build.log") "building libui-ng"))))
+        (fetch-prebuilt! lib out h))
       (clotran-rename (str lib ".part") lib))
     lib))
 
@@ -348,9 +406,17 @@
   "The window's drawing area made a 3D view, drawn by the GPU -- Metal on
   macOS, Vulkan on Windows and Linux: true when there is one. Dragging
   turns it (half a degree a pixel) and scrolling zooms it, in C, with no
-  trip through clotran; the events still come to the window's handler."
+  trip through clotran; the events still come to the window's handler.
+  Without one, g3-error says why."
   [w]
   (= 1 (:ok (call "view3d" (int w)))))
+
+(defn g3-error
+  "Why there is no 3D view here (no GPU driver, say), or \"\"."
+  []
+  (let [buf (fortran/make-array "int4" 512)
+        n (:n (call "g3-error" buf))]
+    (apply str (map #(char (fortran/aget buf %)) (range n)))))
 
 (defn- doubles-array [xs]
   (let [v (vec xs) a (fortran/make-array "real8" (max 1 (count v)))]

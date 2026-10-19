@@ -1,0 +1,4 @@
+;; native/prebuilt.edn: the native library built for each platform from a pinned
+;; commit, for machines with no C compiler (clotran.ui/library): its URL, its
+;; sha256, and the sources it was built from (clotran.ui/source-hash).
+{}

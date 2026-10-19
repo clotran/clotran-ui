@@ -1,4 +1,15 @@
 ;; native/prebuilt.edn: the native library built for each platform from a pinned
 ;; commit, for machines with no C compiler (clotran.ui/library): its URL, its
-;; sha256, and the sources it was built from (clotran.ui/source-hash).
-{}
+;; sha256, and the sources it was built from (clotran.ui/source-hash on that
+;; platform). A change to the native sources makes these not apply until they
+;; are built again and pinned here; a machine with a compiler builds its own.
+{"windows-x86_64"
+ {:url "https://github.com/clotran/clotran-ui/releases/download/native-5b3b0c13/libclotran_ui-windows-x86_64.dll"
+  :sha256 "bb848f1c214c0874f3ac2517a55e5249c0da5169c6f8c556893e33b7c97efd91"
+  :source "1597871409"
+  :built "5b3b0c13 on Windows 10, MSYS2 UCRT64 gcc 16.2; imports only Windows system DLLs"}
+ "mac-aarch64"
+ {:url "https://github.com/clotran/clotran-ui/releases/download/native-5b3b0c13/libclotran_ui-mac-aarch64.dylib"
+  :sha256 "3b4c9aa92d50ddd42232012d7dee19a0cc7daf9c4560c06e248397fce98ab2b2"
+  :source "m522346634"
+  :built "5b3b0c13 on macOS 26 arm64, Apple clang 21, -mmacosx-version-min=11.0; system frameworks only"}}

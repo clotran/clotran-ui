@@ -53,7 +53,8 @@
         shim (str root "/native/clotran_ui.c")
         common (meson-sources "common")]
     (case os
-      :mac (concat ["clang" "-shared" "-fPIC" "-O1" "-w" "-std=c99"] inc ["-o" lib] common
+      :mac (concat ["clang" "-shared" "-fPIC" "-O1" "-w" "-std=c99" "-mmacosx-version-min=11.0"
+                          "-install_name" "@rpath/libclotran_ui.dylib"] inc ["-o" lib] common
                    (meson-sources "darwin") [shim (str root "/native/darwin.m") (str root "/native/metal.m")]
                    ["-framework" "Foundation" "-framework" "AppKit" "-framework" "CoreGraphics" "-framework" "ImageIO"
                     "-framework" "Metal" "-framework" "QuartzCore"])
@@ -129,7 +130,7 @@
     (when-not (= h (:source p))
       (throw (ex-info (str "clotran-ui: no C compiler here, and the prebuilt library for " platform
                            " was built from other sources than these (" (:source p) ", these " h ")") {})))
-    (binding [*out* *err*] (println "clotran-ui: no C compiler here; fetching the prebuilt library for" platform))
+    (binding [*out* *err*] (println "clotran-ui: fetching the prebuilt library for" platform "(no C compiler here, or CLOTRAN_UI_NATIVE=prebuilt)"))
     (sh! ["curl" "-fsSL" "-o" (str lib ".part") (:url p)] out (str out "/fetch.log") (str "fetching " (:url p)))
     (let [got (sha256 (str lib ".part") out)]
       (when-not (= got (:sha256 p))

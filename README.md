@@ -10,6 +10,17 @@ Built over [libui-ng](https://github.com/libui-ng/libui-ng): one small C
 library giving each system's own windows and widgets, with a drawing
 area that is the 2D canvas, and a 3D view drawn by the GPU over it.
 
+## Using it
+
+It needs clotran 1.0.0-rc.8 or later. Name it in your project's `deps.edn`,
+run `clotran deps` to fetch it, and start `clotran` there:
+
+    {:deps {clotran/clotran-ui {:git/url "https://github.com/clotran/clotran-ui"
+                                :git/sha "70bab0c4509480844157c9d54674f943187ab545"}}}
+
+The first `(require 'clotran.ui)` makes the native library (see *No
+compiler?* below), once; after that windows open at once.
+
 ## A window from the REPL
 
     (require '[clotran.ui :as ui])
@@ -29,14 +40,23 @@ window's `:on-event` function: `:move` `:down` `:up` (with `:x` `:y`),
 `:entry true` has a text field above its drawing area; `entry-text` reads
 it), `:left`, `:closed`.
 
+A new window comes to the front, above the terminal or editor clotran
+was started from (on macOS 14 and later the system may leave the
+keyboard with that app until the window is clicked); `(ui/front! w)` brings an open window to the front
+again (a program that redraws into a window it keeps calls it), and does
+nothing to a closed one. `(ui/open? w)` is true while the window is open
+and false from the moment it closes -- as soon as `close!` returns, or
+the person closes it -- before its `:closed` event reaches the handler.
+A handler that throws is reported on stderr once, and again only when
+its failure changes, not on every redraw.
+
 A program that ends with a window open stays alive until the window is
 closed, as clj does with a JFrame; `(ui/wait)` waits for that explicitly.
 
 ## How it works
 
 - **The main thread.** macOS allows windows only on a process's first
-  thread, and clotran evaluates on a second. clotran (core, branch
-  `feat/ui-main-thread`, commit 7594d035) lets the first thread serve: `fortran/main-thread*`
+  thread, and clotran evaluates on a second. clotran (1.0.0-rc.8 or later) lets the first thread serve: `fortran/main-thread*`
   hands it libui-ng's event loop, which runs there until the last window
   closes, and is handed again for the next.
 - **No callbacks into clotran.** libui-ng's draw callback replays the copied
@@ -93,11 +113,11 @@ the window shows (its frame and widgets on macOS, the shown frame for a
 ## Status
 
 macOS (arm64) and Windows 10 (x86_64, MSYS2 UCRT64): windows, the
-display-list canvas, events, the text field, and the 3D view -- 14 of 14
-window checks on each. Linux (GTK 3) has its build line written,
-untested, and no 3D yet. Next: tick labels in the 3D view, and a
-prebuilt DLL so a Windows machine without MSYS2 can open windows; see
-[PLAN.md](PLAN.md).
+display-list canvas, events, the text field, and the 3D view -- 16 of 16
+window checks on macOS, and 15 on a plain Windows with the prebuilt DLL
+(its pictures are not compared there, having no display). Linux (GTK 3)
+has its build line written, untested, and no 3D yet. Next: tick labels
+in the 3D view; see [PLAN.md](PLAN.md).
 
 ## License
 

@@ -49,6 +49,14 @@ closed, as clj does with a JFrame; `(ui/wait)` waits for that explicitly.
   opens it as a clotran package: `native/clotran_ui.c` exports the
   `clotran_manifest` and the `NAME_shim(argc, argv)` routines every clotran
   package does. Nothing is built until a window is wanted.
+- **No compiler?** On a machine with none (a plain Windows PC, a Mac
+  without Xcode's tools) the library is fetched prebuilt instead, from
+  the release `native/prebuilt.edn` pins, and refused unless its sha256 and
+  the sources it was built from match. The Windows one imports only
+  Windows' own DLLs (the UCRT, user32, gdi32, comctl32, d2d1, dwrite...);
+  Vulkan is loaded at run time, so without a GPU driver windows and 2D
+  still work and `g3-error` says why there is no 3D. `CLOTRAN_UI_NATIVE`
+  = `build` or `prebuilt` chooses.
 
 ## 3D on the GPU
 

@@ -602,6 +602,15 @@ void ui_front_shim(int argc, void **argv)
 	if (w) on_main(front_win, w);
 }
 
+// ui_open(id, out open): 1 while the window is open; 0 from the moment it
+// closes (close, or its close button), before its :closed event is handled
+void ui_open_shim(int argc, void **argv)
+{
+	pthread_mutex_lock(&mu);
+	*(int *) argv[1] = live(*(int *) argv[0]) != NULL;
+	pthread_mutex_unlock(&mu);
+}
+
 // ui_open_count(out n): windows open now
 void ui_open_count_shim(int argc, void **argv)
 {
@@ -886,6 +895,7 @@ const char *clotran_manifest(void)
 		"{:name \"next-event\" :symbol \"ui_next_event_shim\" :args [{:name \"ms\" :type :int4 :intent :in :rank 0} {:name \"kind\" :type :int4 :intent :out :rank 0} {:name \"win\" :type :int4 :intent :out :rank 0} {:name \"x\" :type :real8 :intent :out :rank 0} {:name \"y\" :type :real8 :intent :out :rank 0} {:name \"a\" :type :int4 :intent :out :rank 0} {:name \"b\" :type :int4 :intent :out :rank 0}]}"
 		"{:name \"close\" :symbol \"ui_close_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0}]}"
 		"{:name \"front\" :symbol \"ui_front_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0}]}"
+		"{:name \"open\" :symbol \"ui_open_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0} {:name \"open\" :type :int4 :intent :out :rank 0}]}"
 		"{:name \"open-count\" :symbol \"ui_open_count_shim\" :args [{:name \"n\" :type :int4 :intent :out :rank 0}]}"
 		"{:name \"wait\" :symbol \"ui_wait_shim\" :args [{:name \"ms\" :type :int4 :intent :in :rank 0} {:name \"n\" :type :int4 :intent :out :rank 0}]}"
 		"{:name \"snapshot\" :symbol \"ui_snapshot_shim\" :args [{:name \"id\" :type :int4 :intent :in :rank 0} {:name \"w\" :type :int4 :intent :in :rank 0} {:name \"h\" :type :int4 :intent :in :rank 0} {:name \"path\" :type :string :intent :in :rank 0} {:name \"ok\" :type :int4 :intent :out :rank 0}]}"

@@ -377,6 +377,13 @@
   (call "front" (int w))
   nil)
 
+(defn open?
+  "Whether the window is open: false from the moment it closes -- close!
+  has returned, or the person closed it -- before its :closed event
+  reaches the handler."
+  [w]
+  (= 1 (:open (call "open" (int w)))))
+
 (defn open-count [] (:n (call "open-count")))
 
 (defn wait
